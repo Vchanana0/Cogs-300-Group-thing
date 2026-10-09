@@ -6,7 +6,7 @@ import processing.serial.*;
 
 // -------------------------
 // Settings
-// ------------------------
+// -------------------------
 
 final int PORT_INDEX = 2;     // Which entry in the console's port list is the Arduino
 final int BAUD_RATE  = 9600;  // Must match Serial.begin() in Motor.ino
@@ -19,7 +19,7 @@ final int BAUD_RATE  = 9600;  // Must match Serial.begin() in Motor.ino
 Serial port;
 String status = "";
 String arduinoReply = "(nothing yet)";
-char activeKey = 'x';  // Last command sent: w, a, s, d or x (stop)
+char activeKey = 'x';  // Last command sent: w, a, s, d, r or x (stop)
 
 
 // -------------------------
@@ -63,18 +63,20 @@ void draw() {
   textSize(14);
   text(status, width / 2, 30);
 
-  drawKey("W", width / 2,      110, activeKey == 'w');
-  drawKey("A", width / 2 - 70, 180, activeKey == 'a');
-  drawKey("S", width / 2,      180, activeKey == 's');
-  drawKey("D", width / 2 + 70, 180, activeKey == 'd');
+  drawKey("W", width / 2,       110, activeKey == 'w');
+  drawKey("R", width / 2 + 140, 110, activeKey == 'r');
+  drawKey("A", width / 2 - 70,  180, activeKey == 'a');
+  drawKey("S", width / 2,       180, activeKey == 's');
+  drawKey("D", width / 2 + 70,  180, activeKey == 'd');
 
   fill(200);
   textSize(13);
-  text("Hold W A S D to drive, release to stop. Space or X also stops.", width / 2, 250);
+  text("Hold W A S D to drive or R to rotate. Release to stop.", width / 2, 243);
+  text("Space or X also stops.", width / 2, 263);
 
   fill(255);
   textSize(14);
-  text("Arduino says: " + arduinoReply, width / 2, 295);
+  text("Arduino says: " + arduinoReply, width / 2, 302);
 }
 
 void drawKey(String label, float x, float y, boolean active) {
@@ -102,7 +104,7 @@ void keyPressed() {
   char k = Character.toLowerCase(key);
   if (k == ' ') k = 'x';
 
-  if (k == 'w' || k == 'a' || k == 's' || k == 'd' || k == 'x') {
+  if (k == 'w' || k == 'a' || k == 's' || k == 'd' || k == 'r' || k == 'x') {
     sendCommand(k);
   }
 }
