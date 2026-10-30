@@ -1,8 +1,10 @@
 // Left-wall-following robot with PID.
 // - When switched on, it keeps 15 cm from the left wall and keeps that distance.
-// - Gradual corners: the PID steering follows the curve.
-// - Walls ahead: the robot slows down as it gets closer. At FRONT_LIMIT it turns right until
-//   that wall is beside the left sensor (about as far away as it was in front) and the front is clear.
+// - Gradual corners: the PID steering follows the curve (both wheels keep driving).
+// - Walls ahead: the robot slows down as it gets closer. At FRONT_LIMIT it spins right
+//   in place until that wall is beside the left sensor (about as far away as it was
+//   in front) and the front is clear. No timed turns.
+// - Outside corners: if the left wall disappears, it arcs left until it sees the wall again.
 // It starts on its own when powered, so it runs on a battery pack with no computer attached.
 
 // Motor A (left motor)
@@ -23,71 +25,77 @@ int frontEcho = 8;
 int leftTrig = 11;
 int leftEcho = 12;
 
-// PID gains (tune these)
-const float Kp_side = 8;
-const float Ki_side = 0;
-const float Kd_side = 2;
+// Distances in cm (placeholders, tune these)
+const float SET_POINT = 15;     // distance to keep from the left wall
+const float FRONT_LIMIT = 15;   // spin right when the front wall is this close
+const float SLOW_START = 40;    // start slowing down when the front wall is this close
+const float LOST_WALL = 50;     // left reading above this means the wall disappeared
+const float TOLERANCE = 7;      // how close "about as far away" has to be
 
-// Variables to remember previous errors
-float integral_side = 0;
-float prevError_side = 0;
+// Speeds 0-255 (placeholders, tune these)
+const int BASE_SPEED = 150;     // normal driving speed
+const int MIN_SPEED = 80;       // slowest speed while approaching a front wall
+const int TURN_SPEED = 150;     // spin speed for sharp right turns
+const int ARC_LEFT_SPEED = 60;  // left wheel during the outside-corner arc
+const int ARC_RIGHT_SPEED = 160;// right wheel during the outside-corner arc
+
+// PID gains (starter values, tune these)
+const float Kp = 8;
+const float Ki = 0.2;
+const float Kd = 2;
+
+// Variables to remember between loops
+float integral = 0;
+float prevError = 0;
 unsigned long lastTime = 0;
 
-const int set_point = 15;     // cm from the left wall
-
-// Speeds and distances (tune these)
-const int baseSpeed = 150;    // normal driving speed
-const int minSpeed = 80;      // slowest speed when a wall is ahead
-const int turnSpeed = 80;    // speed while turning right
-const int SLOW_DIST = 40;     // cm: start slowing down
-const int FRONT_LIMIT = 25;   // cm: stop going forward and turn right
-const int TOLERANCE = 10;      // cm: how close "about as far away" has to be
-
 void setup() {
-  pinMode(enA, OUTPUT); 
-  pinMode(in1, OUTPUT); 
+  pinMode(enA, OUTPUT);
+  pinMode(in1, OUTPUT);
   pinMode(in2, OUTPUT);
-
-  pinMode(enB, OUTPUT); 
-  pinMode(in3, OUTPUT); 
+  pinMode(enB, OUTPUT);
+  pinMode(in3, OUTPUT);
   pinMode(in4, OUTPUT);
 
-  pinMode(frontTrig, OUTPUT); 
+  pinMode(frontTrig, OUTPUT);
   pinMode(frontEcho, INPUT);
-
-  pinMode(leftTrig, OUTPUT);  
+  pinMode(leftTrig, OUTPUT);
   pinMode(leftEcho, INPUT);
-  
+
   lastTime = millis();
 }
 
 void loop() {
   float front = readDistance(frontTrig, frontEcho);
+  float left = readDistance(leftTrig, leftEcho);
 
-  // Wall ahead: turn right until the wall is beside the left sensor and the front is clear
+  // Wall ahead is too close: spin right until that wall is beside us
   if (front <= FRONT_LIMIT) {
-    float wallDist = front;   // how far the wall was in front
-    setMotors(turnSpeed, -turnSpeed);   // spin right
-    while (true) {
-      float left = readDistance(leftTrig, leftEcho);
+    float target = front;  // remember how far the wall was in front
+    setMotors(TURN_SPEED, -TURN_SPEED);
+    while (!(abs(left - target) <= TOLERANCE && front > FRONT_LIMIT)) {
       front = readDistance(frontTrig, frontEcho);
-      if (abs(left - wallDist) <= TOLERANCE && front > SLOW_DIST) break;
+      left = readDistance(leftTrig, leftEcho);
     }
-    setMotors(0, 0);
-    // Start PID fresh after the turn
-    integral_side = 0;
-    prevError_side = 0;
-    lastTime = millis();
+    resetPID();
+    return;
+  }
+
+  // Left wall disappeared (outside corner): arc left until we see it again
+  if (left > LOST_WALL) {
+    setMotors(ARC_LEFT_SPEED, ARC_RIGHT_SPEED);
+    while (left > LOST_WALL) {
+      left = readDistance(leftTrig, leftEcho);
+    }
+    resetPID();
     return;
   }
 
   // Slow down as the front wall gets closer
-  int speed = baseSpeed;
-  if (front < SLOW_DIST) {
-    speed = map(front, FRONT_LIMIT, SLOW_DIST, minSpeed, baseSpeed);
+  int baseSpeed = BASE_SPEED;
+  if (front < SLOW_START) {
+    baseSpeed = map(front, FRONT_LIMIT, SLOW_START, MIN_SPEED, BASE_SPEED);
   }
-
-  float left = readDistance(leftTrig, leftEcho);
 
   // Calculate time since the previous loop (in seconds)
   unsigned long now = millis();
@@ -95,38 +103,61 @@ void loop() {
   lastTime = now;
 
   // PID
-  float error = left - set_point;
-  integral_side += error * dt;
-  float derivative_side = (error - prevError_side) / dt;
-  prevError_side = error;
+  float error = left - SET_POINT;
+  integral += error * dt;
+  float derivative = (error - prevError) / dt;
+  prevError = error;
 
-  float pid = Kp_side * error + Ki_side * integral_side + Kd_side * derivative_side;
+  float pid = Kp * error
+              + Ki * integral
+              + Kd * derivative;
 
-  // Too far from the wall (positive error) -> steer left
-  int leftSpeed = constrain(speed - int(pid), -255, 255);
-  int rightSpeed = constrain(speed + int(pid), -255, 255);
+  int leftSpeed = constrain(baseSpeed - int(pid), -255, 255);
+  int rightSpeed = constrain(baseSpeed + int(pid), -255, 255);
   setMotors(leftSpeed, rightSpeed);
 }
 
-// Returns distance in cm
-float readDistance(int trig, int echo) {
-  digitalWrite(trig, LOW);
+// Read an HC-SR04 and return the distance in cm
+float readDistance(int trigPin, int echoPin) {
+  digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
-  digitalWrite(trig, HIGH);
+  digitalWrite(trigPin, HIGH);
   delayMicroseconds(10);
-  digitalWrite(trig, LOW);
-  long duration = pulseIn(echo, HIGH, 30000);   // give up after 30 ms
-  if (duration == 0) return 500;                // nothing heard = far away
+  digitalWrite(trigPin, LOW);
+
+  long duration = pulseIn(echoPin, HIGH, 30000);  // give up after 30 ms
+  delay(20);  // let the echo die out so the two sensors don't hear each other
+
+  if (duration == 0) {
+    return 400;  // no echo: treat as nothing in range
+  }
   return duration * 0.0343 / 2;
 }
 
-// Positive = forward, negative = backward
+// Positive speed = forward, negative speed = backward
 void setMotors(int leftSpeed, int rightSpeed) {
-  digitalWrite(in1, leftSpeed >= 0 ? HIGH : LOW);
-  digitalWrite(in2, leftSpeed >= 0 ? LOW : HIGH);
+  if (leftSpeed >= 0) {
+    digitalWrite(in1, HIGH);
+    digitalWrite(in2, LOW);
+  } else {
+    digitalWrite(in1, LOW);
+    digitalWrite(in2, HIGH);
+  }
   analogWrite(enA, abs(leftSpeed));
 
-  digitalWrite(in3, rightSpeed >= 0 ? HIGH : LOW);
-  digitalWrite(in4, rightSpeed >= 0 ? LOW : HIGH);
+  if (rightSpeed >= 0) {
+    digitalWrite(in3, HIGH);
+    digitalWrite(in4, LOW);
+  } else {
+    digitalWrite(in3, LOW);
+    digitalWrite(in4, HIGH);
+  }
   analogWrite(enB, abs(rightSpeed));
+}
+
+// Start PID fresh after a turn so old errors don't cause a jerk
+void resetPID() {
+  integral = 0;
+  prevError = 0;
+  lastTime = millis();
 }
