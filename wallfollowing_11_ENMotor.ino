@@ -28,9 +28,9 @@ int leftEcho = 12;
 float set_point = 15;              // Distance to keep from the left wall (cm). Replaced at startup
                                    // by whatever distance the robot is placed at.
 const float MIN_SET_POINT = 4;     // Closest the sensor can measure reliably (cm)
-const float MAX_SET_POINT = 500;    // Farthest starting distance it will accept (cm)
+const float MAX_SET_POINT = 50;    // Farthest starting distance it will accept (cm)
 const int BASE_SPEED = 80;        // Forward speed while following (0-255). Slower = more time to react
-const int MAX_CORRECTION = 40;     // Most the PID can add to one wheel and take from the other
+const int MAX_CORRECTION = 80;     // Most the PID can add to one wheel and take from the other
 
 // Slowing down for a wall ahead
 const int SLOW_DISTANCE = 100;      // Start slowing down when a wall ahead is closer than this (cm)
@@ -39,15 +39,15 @@ const int TOO_CLOSE_TO_READ = 4;  // If the front sensor loses the echo after re
                                    // the wall is too close to measure, so treat it as right in front
 
 // PID gains (tune Kp first, then Kd. Ki is optional)
-const float Kp = 10.0;
+const float Kp = 3.0;
 const float Ki = 0.0;
-const float Kd = 2.5;
+const float Kd = 2.0;
 const float INTEGRAL_LIMIT = 50;   // Stops the I term from building up too far
 
 // Corner settings
 const int FRONT_LIMIT = 35;         // Wall ahead closer than this (cm) = inside corner, turn right
 const int FRONT_CONFIRM = 2;       // Readings in a row needed before turning at an inside corner
-const int TURN_SPEED = 170;        // Motor speed for turning in place
+const int TURN_SPEED = 80;        // Motor speed for turning in place
 
 // Right turn at a wall ahead
 const float TURN_MATCH = 10;       // Stop turning when the left sensor reads within this many cm of
