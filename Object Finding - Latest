@@ -1,0 +1,2203 @@
+#include <Arduino.h>
+#include <math.h>
+
+// ==========================================
+// MOTOR PINS
+// ==========================================
+
+const int enA = 10;
+const int in1 = 4;
+const int in2 = 5;
+
+const int enB = 9;
+const int in3 = A3;
+const int in4 = A4;
+
+// ==========================================
+// SENSOR PINS
+// ==========================================
+
+const int frontTrig = 7;
+const int frontEcho = 8;
+const int servoPin = A5;
+
+const int leftEncoderPin = 2;
+const int rightEncoderPin = 3;
+
+// ==========================================
+// OBJECT DETECTION SETTINGS
+// ==========================================
+
+const int SCAN_MIN = 30;
+const int SCAN_MAX = 150;
+const int SCAN_STEP = 2;
+
+const int SCAN_POINTS =
+  (SCAN_MAX - SCAN_MIN) / SCAN_STEP + 1;
+
+const float MAX_RANGE = 300.0;
+
+const float MIN_OBJECT_WIDTH = 5.0;
+const float MAX_OBJECT_WIDTH = 120.0;
+
+const float MIN_SEARCH_DISTANCE = 8.0;
+
+const float EDGE_JUMP = 5.0;
+const float MAX_GROUP_DEPTH = 20.0;
+
+const float BEAM_CORRECTION = 10.0;
+const float SWEEP_AGREEMENT = 10.0;
+
+const int MIN_POINTS = 3;
+
+const unsigned long PING_GAP = 60;
+const unsigned long ECHO_TIMEOUT = 22000;
+
+// ==========================================
+// MOTOR SETTINGS
+// ==========================================
+
+const int TURN_SPEED = 150;
+const int DRIVE_SPEED = 145;
+const int SLOW_SPEED = 120;
+const int START_SPEED = 160;
+
+const int CONTACT_SPEED = 110;
+
+const int LEFT_MOTOR_DIRECTION = 1;
+const int RIGHT_MOTOR_DIRECTION = 1;
+const int TURN_DIRECTION = 1;
+
+const int LEFT_TRIM = 0;
+const int RIGHT_TRIM = 0;
+
+// ==========================================
+// FINAL APPROACH AND CONTACT
+// ==========================================
+
+const float STOP_DISTANCE = 5.0;
+const float SLOW_DISTANCE = 50.0;
+
+const unsigned long CONTACT_TIME = 350;
+const float CONTACT_DISTANCE = 5.0;
+
+// ==========================================
+// SAFETY TIMEOUTS
+// ==========================================
+
+const unsigned long STALL_TIMEOUT = 2000;
+const unsigned long TURN_TIMEOUT = 10000;
+const unsigned long APPROACH_TIMEOUT = 180000;
+const unsigned long TOTAL_TIMEOUT = 600000;
+
+// ==========================================
+// SEARCH AND REPOSITIONING
+// ==========================================
+
+const int MAX_SCAN_RETRIES = 8;
+const int MAX_RECOVERIES = 6;
+
+const unsigned long SEARCH_FORWARD_TIME = 4000;
+const float SEARCH_FORWARD_CM = 60.0;
+
+const float SEARCH_CLEARANCE = 40.0;
+const float SEARCH_STOP_DISTANCE = 30.0;
+
+const float TRACK_TOLERANCE = 30.0;
+
+const int MAX_MISSING_READINGS = 5;
+
+int scanRetries = 0;
+
+// ==========================================
+// SERVO SETTINGS
+// ==========================================
+
+const int SERVO_MIN_US = 544;
+const int SERVO_MAX_US = 2400;
+
+const float SENSOR_OFFSET = 8.0;
+
+int servoAngle = 90;
+
+unsigned long lastServoPulse = 0;
+
+// ==========================================
+// WHEEL SETTINGS
+// ==========================================
+
+const float WHEEL_DIAMETER_MM = 70.0;
+const float WHEEL_SPACING_MM = 140.0;
+
+const int ENCODER_SLOTS = 20;
+
+const float MM_PER_TICK =
+  PI * WHEEL_DIAMETER_MM /
+  (ENCODER_SLOTS * 2.0);
+
+const float DEG_PER_TICK =
+  360.0 * MM_PER_TICK /
+  (PI * WHEEL_SPACING_MM);
+
+const float TURN_CALIBRATION = 1.0;
+
+// ==========================================
+// SCAN MEMORY
+// ==========================================
+
+float scanDistance[SCAN_POINTS];
+float firstSweep[SCAN_POINTS];
+
+char scanLabel[SCAN_POINTS];
+
+byte confidence[SCAN_POINTS];
+
+// ==========================================
+// TARGET VARIABLES
+// ==========================================
+
+bool targetFound = false;
+bool ambiguousTarget = false;
+bool finished = false;
+bool fatalError = false;
+
+float targetWidth = 0;
+float targetDistance = 0;
+float targetAngle = 0;
+float targetServoAngle = 90;
+
+float targetScore = 0;
+float secondScore = 0;
+float widestUncertain = 0;
+
+char targetName = '-';
+
+unsigned long missionStart = 0;
+
+// ==========================================
+// ENCODERS
+// ==========================================
+
+volatile unsigned long leftTicks = 0;
+volatile unsigned long rightTicks = 0;
+
+volatile unsigned long lastLeftTick = 0;
+volatile unsigned long lastRightTick = 0;
+
+void leftEncoder() {
+
+  unsigned long now = micros();
+
+  if (now - lastLeftTick >= 1000) {
+
+    leftTicks++;
+    lastLeftTick = now;
+  }
+}
+
+void rightEncoder() {
+
+  unsigned long now = micros();
+
+  if (now - lastRightTick >= 1000) {
+
+    rightTicks++;
+    lastRightTick = now;
+  }
+}
+
+void resetEncoders() {
+
+  noInterrupts();
+
+  leftTicks = 0;
+  rightTicks = 0;
+
+  interrupts();
+}
+
+void getEncoders(
+  unsigned long &left,
+  unsigned long &right
+) {
+
+  noInterrupts();
+
+  left = leftTicks;
+  right = rightTicks;
+
+  interrupts();
+}
+
+void printEncoders() {
+
+  unsigned long left, right;
+
+  getEncoders(left, right);
+
+  Serial.print(F("ENCODERS | Left: "));
+  Serial.print(left);
+
+  Serial.print(F(" | Right: "));
+  Serial.println(right);
+}
+
+float travelledDistance() {
+
+  unsigned long left, right;
+
+  getEncoders(left, right);
+
+  float averageTicks =
+    (left + right) / 2.0f;
+
+  return averageTicks * MM_PER_TICK / 10.0f;
+}
+
+// ==========================================
+// PROCESSING COMMUNICATION
+// ==========================================
+
+void status(const __FlashStringHelper *message) {
+
+  Serial.print(F("@STATUS "));
+  Serial.println(message);
+}
+
+void sendLiveDistance(float distance) {
+
+  Serial.print(F("@D "));
+  Serial.println(distance, 1);
+}
+
+void sendConfig() {
+
+  Serial.print(F("@C "));
+  Serial.print(MAX_RANGE);
+
+  Serial.print(' ');
+  Serial.print(SCAN_STEP);
+
+  Serial.print(' ');
+  Serial.println(MAX_OBJECT_WIDTH);
+}
+
+// ==========================================
+// MOTOR CONTROL
+// ==========================================
+
+void leftMotor(int power) {
+
+  power *= LEFT_MOTOR_DIRECTION;
+
+  power = constrain(power, -255, 255);
+
+  if (power > 0) {
+
+    digitalWrite(in1, HIGH);
+    digitalWrite(in2, LOW);
+
+  } else if (power < 0) {
+
+    digitalWrite(in1, LOW);
+    digitalWrite(in2, HIGH);
+
+  } else {
+
+    digitalWrite(in1, LOW);
+    digitalWrite(in2, LOW);
+  }
+
+  analogWrite(enA, abs(power));
+}
+
+void rightMotor(int power) {
+
+  power *= RIGHT_MOTOR_DIRECTION;
+
+  power = constrain(power, -255, 255);
+
+  if (power > 0) {
+
+    digitalWrite(in3, HIGH);
+    digitalWrite(in4, LOW);
+
+  } else if (power < 0) {
+
+    digitalWrite(in3, LOW);
+    digitalWrite(in4, HIGH);
+
+  } else {
+
+    digitalWrite(in3, LOW);
+    digitalWrite(in4, LOW);
+  }
+
+  analogWrite(enB, abs(power));
+}
+
+void drive(int leftPower, int rightPower) {
+
+  leftMotor(leftPower);
+  rightMotor(rightPower);
+}
+
+void stopMotors() {
+
+  drive(0, 0);
+}
+
+void fail(const __FlashStringHelper *message) {
+
+  stopMotors();
+
+  fatalError = true;
+
+  status(message);
+}
+
+bool missionExpired() {
+
+  return millis() - missionStart >= TOTAL_TIMEOUT;
+}
+
+// ==========================================
+// MANUAL SERVO CONTROL
+// ==========================================
+
+// Avoid Servo library because motor PWM
+// pins 9 and 10 use Timer1.
+
+void servoPulse() {
+
+  int pulse = map(
+    servoAngle,
+    0,
+    180,
+    SERVO_MIN_US,
+    SERVO_MAX_US
+  );
+
+  digitalWrite(servoPin, HIGH);
+
+  delayMicroseconds(pulse);
+
+  digitalWrite(servoPin, LOW);
+
+  lastServoPulse = millis();
+}
+
+void holdServo() {
+
+  if (millis() - lastServoPulse >= 20) {
+
+    servoPulse();
+  }
+}
+
+void waitMs(unsigned long duration) {
+
+  unsigned long start = millis();
+
+  while (millis() - start < duration) {
+
+    holdServo();
+  }
+}
+
+void pointServo(
+  int angle,
+  unsigned long duration
+) {
+
+  servoAngle = constrain(angle, 0, 180);
+
+  waitMs(duration);
+}
+
+// ==========================================
+// ULTRASONIC SENSOR
+// ==========================================
+
+float readDistance() {
+
+  holdServo();
+
+  digitalWrite(frontTrig, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(frontTrig, HIGH);
+  delayMicroseconds(10);
+
+  digitalWrite(frontTrig, LOW);
+
+  unsigned long duration = pulseIn(
+    frontEcho,
+    HIGH,
+    ECHO_TIMEOUT
+  );
+
+  if (duration == 0) {
+
+    return -1;
+  }
+
+  float distance =
+    duration * 0.0343f / 2.0f;
+
+  if (distance > MAX_RANGE) {
+
+    return -1;
+  }
+
+  return max(distance, 2.0f);
+}
+
+// ==========================================
+// DISTANCE FILTERING
+// ==========================================
+
+float filteredDistance() {
+
+  float a = readDistance();
+
+  waitMs(PING_GAP);
+
+  float b = readDistance();
+
+  waitMs(PING_GAP);
+
+  if (
+    a > 0 &&
+    b > 0 &&
+    fabs(a - b) <= 8.0f
+  ) {
+
+    return (a + b) / 2.0f;
+  }
+
+  float c = readDistance();
+
+  waitMs(PING_GAP);
+
+  if (
+    a > 0 &&
+    c > 0 &&
+    fabs(a - c) <= 8.0f
+  ) {
+
+    return (a + c) / 2.0f;
+  }
+
+  if (
+    b > 0 &&
+    c > 0 &&
+    fabs(b - c) <= 8.0f
+  ) {
+
+    return (b + c) / 2.0f;
+  }
+
+  if (a > 0 && b <= 0 && c <= 0) {
+
+    return a;
+  }
+
+  if (b > 0 && a <= 0 && c <= 0) {
+
+    return b;
+  }
+
+  if (c > 0 && a <= 0 && b <= 0) {
+
+    return c;
+  }
+
+  return -1;
+}
+
+// ==========================================
+// GEOMETRY
+// ==========================================
+
+int indexToAngle(int index) {
+
+  return SCAN_MIN + index * SCAN_STEP;
+}
+
+float correctedBearing(
+  float servoPosition,
+  float distance
+) {
+
+  float bearing =
+    radians(90.0f - servoPosition);
+
+  float x = distance * sin(bearing);
+
+  float y =
+    SENSOR_OFFSET +
+    distance * cos(bearing);
+
+  return degrees(atan2(x, y));
+}
+
+float calculateWidth(
+  float distance,
+  float angularWidth
+) {
+
+  float correctedWidth = max(
+    angularWidth - BEAM_CORRECTION,
+    angularWidth * 0.35f
+  );
+
+  return
+    2.0f * distance *
+    sin(radians(correctedWidth / 2.0f));
+}
+
+// ==========================================
+// PERFORM SWEEP
+// ==========================================
+
+void sweep(bool reverse) {
+
+  stopMotors();
+
+  Serial.println(F("@S"));
+
+  int start =
+    reverse ? SCAN_POINTS - 1 : 0;
+
+  int end =
+    reverse ? 0 : SCAN_POINTS - 1;
+
+  int direction =
+    reverse ? -1 : 1;
+
+  pointServo(indexToAngle(start), 700);
+
+  for (
+    int i = start;
+    direction > 0 ? i <= end : i >= end;
+    i += direction
+  ) {
+
+    if (missionExpired()) {
+
+      fail(F("ERROR: Mission timeout"));
+
+      return;
+    }
+
+    int angle = indexToAngle(i);
+
+    pointServo(angle, 60);
+
+    float distance = filteredDistance();
+
+    scanDistance[i] =
+      distance > 0 ? distance : 0;
+
+    scanLabel[i] = '-';
+
+    Serial.print(F("@R "));
+    Serial.print(angle);
+
+    Serial.print(' ');
+    Serial.println(scanDistance[i], 1);
+  }
+}
+
+// ==========================================
+// COMBINE BOTH SWEEPS
+// ==========================================
+
+void combineSweeps() {
+
+  for (int i = 0; i < SCAN_POINTS; i++) {
+
+    float a = firstSweep[i];
+    float b = scanDistance[i];
+
+    confidence[i] = 0;
+
+    if (a > 0 && b > 0) {
+
+      if (fabs(a - b) <= SWEEP_AGREEMENT) {
+
+        scanDistance[i] =
+          (a + b) / 2.0f;
+
+        confidence[i] = 2;
+
+      } else {
+
+        scanDistance[i] = 0;
+      }
+
+    } else if (a > 0 || b > 0) {
+
+      scanDistance[i] = max(a, b);
+
+      confidence[i] = 1;
+
+    } else {
+
+      scanDistance[i] = 0;
+    }
+  }
+
+  // Repair one missing point when both
+  // neighboring readings agree.
+
+  for (int i = 1; i < SCAN_POINTS - 1; i++) {
+
+    if (scanDistance[i] > 0) {
+
+      continue;
+    }
+
+    float left = scanDistance[i - 1];
+    float right = scanDistance[i + 1];
+
+    if (
+      left > 0 &&
+      right > 0 &&
+      confidence[i - 1] == 2 &&
+      confidence[i + 1] == 2 &&
+      fabs(left - right) <= 6.0f
+    ) {
+
+      scanDistance[i] =
+        (left + right) / 2.0f;
+
+      confidence[i] = 0;
+    }
+  }
+}
+
+// ==========================================
+// ANALYZE OBJECT
+// ==========================================
+
+void analyzeObject(
+  int first,
+  int last,
+  char name
+) {
+
+  int count = last - first + 1;
+
+  float total = 0;
+  float nearest = MAX_RANGE;
+  float farthest = 0;
+
+  int confirmedPoints = 0;
+  int measuredPoints = 0;
+
+  for (int i = first; i <= last; i++) {
+
+    float distance = scanDistance[i];
+
+    total += distance;
+
+    nearest = min(nearest, distance);
+    farthest = max(farthest, distance);
+
+    if (confidence[i] > 0) {
+
+      measuredPoints++;
+    }
+
+    if (confidence[i] == 2) {
+
+      confirmedPoints++;
+    }
+  }
+
+  float average = total / count;
+
+  int firstAngle = indexToAngle(first);
+  int lastAngle = indexToAngle(last);
+
+  float middle =
+    (firstAngle + lastAngle) / 2.0f;
+
+  float angularWidth =
+    lastAngle - firstAngle + SCAN_STEP;
+
+  float width = calculateWidth(
+    average,
+    angularWidth
+  );
+
+  float agreement =
+    (float)confirmedPoints / count;
+
+  bool touchesEdge =
+    first == 0 ||
+    last == SCAN_POINTS - 1;
+
+  bool noise =
+    measuredPoints < MIN_POINTS ||
+    width < MIN_OBJECT_WIDTH;
+
+  bool tooClose =
+    nearest < MIN_SEARCH_DISTANCE;
+
+  bool oversized =
+    width > MAX_OBJECT_WIDTH;
+
+  bool broadArc =
+    average > 60.0f &&
+    angularWidth > 55.0f &&
+    farthest - nearest < 15.0f;
+
+  bool wall =
+    touchesEdge ||
+    oversized ||
+    tooClose;
+
+  bool uncertain =
+    broadArc ||
+    agreement < 0.25f;
+
+  char type = 'K';
+
+  if (noise || uncertain) {
+
+    type = 'N';
+  }
+
+  if (wall) {
+
+    type = 'W';
+  }
+
+  // Send object information to Processing.
+
+  Serial.print(F("@T "));
+  Serial.print(name);
+
+  Serial.print(' ');
+  Serial.print(type);
+
+  Serial.print(' ');
+  Serial.print(middle, 1);
+
+  Serial.print(' ');
+  Serial.print(average, 1);
+
+  Serial.print(' ');
+  Serial.print(width, 1);
+
+  Serial.print(' ');
+  Serial.print(firstAngle);
+
+  Serial.print(' ');
+  Serial.println(lastAngle);
+
+  Serial.print(F("Object "));
+  Serial.print(name);
+
+  Serial.print(F(" | Width: "));
+  Serial.print(width, 1);
+
+  Serial.print(F(" | Agreement: "));
+  Serial.print(agreement * 100.0f, 0);
+
+  Serial.print(F("% | Span: "));
+  Serial.println(angularWidth, 1);
+
+  for (int i = first; i <= last; i++) {
+
+    scanLabel[i] =
+      type == 'K'
+      ? name
+      : (char)(name - 'A' + 'a');
+  }
+
+  // Remember larger uncertain objects.
+
+  if (
+    !noise &&
+    !tooClose &&
+    !touchesEdge &&
+    (uncertain || oversized)
+  ) {
+
+    widestUncertain = max(
+      widestUncertain,
+      width
+    );
+  }
+
+  if (type != 'K') {
+
+    return;
+  }
+
+  // Width remains the primary criterion.
+
+  float score =
+    width * (0.85f + 0.15f * agreement);
+
+  if (!targetFound || score > targetScore) {
+
+    secondScore = targetScore;
+
+    targetFound = true;
+
+    targetScore = score;
+    targetWidth = width;
+
+    targetName = name;
+    targetDistance = average;
+    targetServoAngle = middle;
+
+    targetAngle = correctedBearing(
+      middle,
+      average
+    );
+
+  } else {
+
+    secondScore = max(secondScore, score);
+  }
+}
+
+// ==========================================
+// GROUP SCAN POINTS
+// ==========================================
+
+void analyzeScan() {
+
+  targetFound = false;
+  ambiguousTarget = false;
+
+  targetWidth = 0;
+  targetScore = 0;
+  secondScore = 0;
+  widestUncertain = 0;
+
+  targetName = '-';
+
+  int i = 0;
+
+  char name = 'A';
+
+  while (i < SCAN_POINTS) {
+
+    if (scanDistance[i] <= 0) {
+
+      i++;
+
+      continue;
+    }
+
+    int first = i;
+
+    float nearest = scanDistance[i];
+    float farthest = scanDistance[i];
+
+    while (i + 1 < SCAN_POINTS) {
+
+      float current = scanDistance[i];
+      float next = scanDistance[i + 1];
+
+      if (next <= 0) {
+
+        break;
+      }
+
+      if (fabs(current - next) > EDGE_JUMP) {
+
+        break;
+      }
+
+      float newNearest = min(nearest, next);
+      float newFarthest = max(farthest, next);
+
+      if (
+        newFarthest - newNearest >
+        MAX_GROUP_DEPTH
+      ) {
+
+        break;
+      }
+
+      nearest = newNearest;
+      farthest = newFarthest;
+
+      i++;
+    }
+
+    analyzeObject(first, i, name);
+
+    if (name < 'Z') {
+
+      name++;
+    }
+
+    i++;
+  }
+
+  if (
+    targetFound &&
+    widestUncertain > targetWidth * 1.25f &&
+    scanRetries < 2
+  ) {
+
+    ambiguousTarget = true;
+  }
+
+  if (
+    targetFound &&
+    secondScore > targetScore * 0.92f &&
+    scanRetries < 2
+  ) {
+
+    ambiguousTarget = true;
+  }
+
+  if (ambiguousTarget) {
+
+    targetName = '-';
+  }
+
+  for (int k = 0; k < SCAN_POINTS; k++) {
+
+    Serial.print(F("@P "));
+    Serial.print(indexToAngle(k));
+
+    Serial.print(' ');
+    Serial.print(scanDistance[k], 1);
+
+    Serial.print(' ');
+    Serial.println(scanLabel[k]);
+  }
+
+  Serial.print(F("@B "));
+  Serial.println(targetName);
+
+  Serial.println(F("@E"));
+}
+
+// ==========================================
+// VERIFY SELECTED TARGET
+// ==========================================
+
+bool verifyTarget() {
+
+  stopMotors();
+
+  status(F("Verifying selected object"));
+
+  int center = (int)round(targetServoAngle);
+
+  int matches = 0;
+
+  float totalDistance = 0;
+  float totalAngle = 0;
+
+  for (
+    int angle = center - 6;
+    angle <= center + 6;
+    angle += 3
+  ) {
+
+    if (missionExpired()) {
+
+      fail(F("ERROR: Mission timeout"));
+
+      return false;
+    }
+
+    int actualAngle =
+      constrain(angle, SCAN_MIN, SCAN_MAX);
+
+    pointServo(actualAngle, 180);
+
+    float distance = filteredDistance();
+
+    if (
+      distance > 0 &&
+      fabs(distance - targetDistance) <= 20.0f
+    ) {
+
+      matches++;
+
+      totalDistance += distance;
+      totalAngle += actualAngle;
+    }
+  }
+
+  pointServo(90, 300);
+
+  if (matches < 2) {
+
+    return false;
+  }
+
+  targetDistance =
+    totalDistance / matches;
+
+  targetServoAngle =
+    totalAngle / matches;
+
+  targetAngle = correctedBearing(
+    targetServoAngle,
+    targetDistance
+  );
+
+  return true;
+}
+
+// ==========================================
+// FIND DESTINATION
+// ==========================================
+
+bool findDestination() {
+
+  stopMotors();
+
+  status(F("Scanning forward"));
+
+  sweep(false);
+
+  if (fatalError) {
+
+    return false;
+  }
+
+  for (int i = 0; i < SCAN_POINTS; i++) {
+
+    firstSweep[i] = scanDistance[i];
+  }
+
+  status(F("Scanning backward"));
+
+  sweep(true);
+
+  if (fatalError) {
+
+    return false;
+  }
+
+  combineSweeps();
+
+  status(F("Ranking detected objects"));
+
+  analyzeScan();
+
+  pointServo(90, 300);
+
+  if (!targetFound) {
+
+    status(F("No suitable destination found"));
+
+    return false;
+  }
+
+  if (ambiguousTarget) {
+
+    status(F("Ambiguous objects - repositioning"));
+
+    return false;
+  }
+
+  if (!verifyTarget()) {
+
+    if (fatalError) {
+
+      return false;
+    }
+
+    if (!verifyTarget()) {
+
+      status(F("Target verification failed"));
+
+      return false;
+    }
+  }
+
+  float bearing =
+    radians(90.0f - targetServoAngle);
+
+  float axleDistance = sqrt(
+    targetDistance * targetDistance +
+    SENSOR_OFFSET * SENSOR_OFFSET +
+    2.0f * SENSOR_OFFSET *
+    targetDistance * cos(bearing)
+  );
+
+  Serial.print(F("@TARGET "));
+  Serial.print(targetAngle, 1);
+
+  Serial.print(' ');
+  Serial.print(axleDistance, 1);
+
+  Serial.print(' ');
+  Serial.println(targetWidth, 1);
+
+  status(F("Widest destination selected"));
+
+  return true;
+}
+
+// ==========================================
+// STRAIGHT DRIVING
+// ==========================================
+
+void driveStraight(int speed) {
+
+  unsigned long left, right;
+
+  getEncoders(left, right);
+
+  long difference =
+    (long)left - (long)right;
+
+  int correction = constrain(
+    difference * 2L,
+    -20L,
+    20L
+  );
+
+  drive(
+    speed - correction + LEFT_TRIM,
+    speed + correction + RIGHT_TRIM
+  );
+}
+
+// ==========================================
+// CHECK FOR OBSTACLES
+// ==========================================
+
+bool confirmedClearance(float clearance) {
+
+  int valid = 0;
+
+  for (int attempt = 0; attempt < 5; attempt++) {
+
+    float distance = readDistance();
+
+    waitMs(PING_GAP);
+
+    if (
+      distance > 0 &&
+      distance < clearance
+    ) {
+
+      return false;
+    }
+
+    if (distance >= clearance) {
+
+      valid++;
+    }
+  }
+
+  return valid >= 2;
+}
+
+// ==========================================
+// MOVE FORWARD AND RESCAN
+// ==========================================
+
+bool moveForwardAndRescan() {
+
+  stopMotors();
+
+  status(F("Checking forward clearance"));
+
+  pointServo(105, 300);
+
+  bool leftClear =
+    confirmedClearance(SEARCH_CLEARANCE);
+
+  pointServo(75, 300);
+
+  bool rightClear =
+    confirmedClearance(SEARCH_CLEARANCE);
+
+  pointServo(90, 300);
+
+  bool centerClear =
+    confirmedClearance(SEARCH_CLEARANCE);
+
+  if (
+    !leftClear ||
+    !rightClear ||
+    !centerClear
+  ) {
+
+    status(F("Clearance not confirmed"));
+
+    return false;
+  }
+
+  status(F("Moving forward for better view"));
+
+  resetEncoders();
+
+  unsigned long start = millis();
+
+  drive(START_SPEED, START_SPEED);
+
+  while (
+    millis() - start < SEARCH_FORWARD_TIME
+  ) {
+
+    if (missionExpired()) {
+
+      fail(F("ERROR: Mission timeout"));
+
+      return false;
+    }
+
+    float distance = readDistance();
+
+    sendLiveDistance(distance);
+
+    if (
+      distance > 0 &&
+      distance < SEARCH_STOP_DISTANCE
+    ) {
+
+      stopMotors();
+
+      status(F("Repositioning stopped for obstacle"));
+
+      return false;
+    }
+
+    if (distance <= 0) {
+
+      stopMotors();
+
+      bool clearAgain = false;
+
+      for (int retry = 0; retry < 3; retry++) {
+
+        waitMs(PING_GAP);
+
+        distance = readDistance();
+
+        sendLiveDistance(distance);
+
+        if (
+          distance > 0 &&
+          distance < SEARCH_STOP_DISTANCE
+        ) {
+
+          status(F("Obstacle detected"));
+
+          return false;
+        }
+
+        if (distance >= SEARCH_STOP_DISTANCE) {
+
+          clearAgain = true;
+
+          break;
+        }
+      }
+
+      if (!clearAgain) {
+
+        status(F("Repositioning lost clearance"));
+
+        return false;
+      }
+
+      if (millis() - start >= SEARCH_FORWARD_TIME) {
+
+        break;
+      }
+    }
+
+    // Stop after the configured repositioning distance.
+
+    if (travelledDistance() >= SEARCH_FORWARD_CM) {
+
+      break;
+    }
+
+    if (millis() - start >= 100) {
+
+      driveStraight(DRIVE_SPEED);
+
+    } else {
+
+      drive(START_SPEED, START_SPEED);
+    }
+
+    waitMs(PING_GAP);
+  }
+
+  stopMotors();
+
+  printEncoders();
+
+  Serial.print(F("Repositioned distance: "));
+  Serial.print(travelledDistance(), 1);
+  Serial.println(F(" cm"));
+
+  waitMs(500);
+
+  status(F("Repositioning complete - rescanning"));
+
+  return true;
+}
+
+// ==========================================
+// TURN ROBOT
+// ==========================================
+
+bool turnRobot(float angle) {
+
+  if (fabs(angle) < 3.0f) {
+
+    return true;
+  }
+
+  stopMotors();
+
+  pointServo(90, 200);
+
+  resetEncoders();
+
+  float requiredTicks =
+    fabs(angle) /
+    (DEG_PER_TICK * TURN_CALIBRATION);
+
+  int minimumWheelTicks = max(
+    1,
+    (int)(requiredTicks * 0.7f)
+  );
+
+  int direction =
+    (angle > 0 ? 1 : -1) *
+    TURN_DIRECTION;
+
+  unsigned long start = millis();
+
+  unsigned long lastLeftMovement = millis();
+  unsigned long lastRightMovement = millis();
+
+  unsigned long previousLeft = 0;
+  unsigned long previousRight = 0;
+
+  status(F("Turning towards destination"));
+
+  drive(
+    direction * TURN_SPEED,
+    -direction * TURN_SPEED
+  );
+
+  while (true) {
+
+    holdServo();
+
+    unsigned long left, right;
+
+    getEncoders(left, right);
+
+    float averageTicks =
+      (left + right) / 2.0f;
+
+    if (
+      averageTicks >= requiredTicks &&
+      left >= (unsigned long)minimumWheelTicks &&
+      right >= (unsigned long)minimumWheelTicks
+    ) {
+
+      break;
+    }
+
+    if (left != previousLeft) {
+
+      previousLeft = left;
+      lastLeftMovement = millis();
+    }
+
+    if (right != previousRight) {
+
+      previousRight = right;
+      lastRightMovement = millis();
+    }
+
+    if (
+      millis() - lastLeftMovement >
+      STALL_TIMEOUT ||
+      millis() - lastRightMovement >
+      STALL_TIMEOUT
+    ) {
+
+      fail(F("ERROR: Motor or encoder stalled"));
+
+      return false;
+    }
+
+    if (
+      millis() - start > TURN_TIMEOUT ||
+      missionExpired()
+    ) {
+
+      fail(F("ERROR: Turn timeout"));
+
+      return false;
+    }
+  }
+
+  stopMotors();
+
+  waitMs(250);
+
+  printEncoders();
+
+  Serial.print(F("@TURN "));
+  Serial.println(angle, 1);
+
+  return true;
+}
+
+// ==========================================
+// TARGET MATCHING
+// ==========================================
+
+bool matchesTarget(
+  float distance,
+  float expected
+) {
+
+  return
+    distance > 0 &&
+    fabs(distance - expected) <=
+    TRACK_TOLERANCE;
+}
+
+// ==========================================
+// RECOVER LOST TARGET
+// ==========================================
+
+bool recoverTarget(
+  float expected,
+  int range,
+  float &recovered
+) {
+
+  stopMotors();
+
+  status(F("Searching for lost target"));
+
+  int runCount = 0;
+
+  float runDistance = 0;
+  float runAngle = 0;
+
+  int bestCount = 0;
+
+  float bestDistance = 0;
+  float bestAngle = 90;
+
+  float bestScore = 100000;
+
+  for (
+    int angle = 90 - range;
+    angle <= 90 + range;
+    angle += 5
+  ) {
+
+    if (missionExpired()) {
+
+      fail(F("ERROR: Mission timeout"));
+
+      return false;
+    }
+
+    pointServo(angle, 180);
+
+    float distance = filteredDistance();
+
+    if (
+      distance > STOP_DISTANCE &&
+      matchesTarget(distance, expected)
+    ) {
+
+      runCount++;
+
+      runDistance += distance;
+      runAngle += angle;
+
+      if (runCount >= 2) {
+
+        float average =
+          runDistance / runCount;
+
+        float middle =
+          runAngle / runCount;
+
+        float score =
+          fabs(average - expected) +
+          fabs(middle - 90.0f) * 0.5f -
+          runCount * 2.0f;
+
+        if (score < bestScore) {
+
+          bestScore = score;
+
+          bestCount = runCount;
+
+          bestDistance = average;
+          bestAngle = middle;
+        }
+      }
+
+    } else {
+
+      runCount = 0;
+
+      runDistance = 0;
+      runAngle = 0;
+    }
+  }
+
+  pointServo(90, 300);
+
+  if (bestCount < 2) {
+
+    return false;
+  }
+
+  float correction = correctedBearing(
+    bestAngle,
+    bestDistance
+  );
+
+  if (fabs(correction) > 5.0f) {
+
+    if (!turnRobot(correction)) {
+
+      return false;
+    }
+  }
+
+  pointServo(90, 300);
+
+  for (int attempt = 0; attempt < 3; attempt++) {
+
+    float center = filteredDistance();
+
+    if (matchesTarget(center, bestDistance)) {
+
+      recovered = center;
+
+      status(F("Target recovered"));
+
+      return true;
+    }
+  }
+
+  return false;
+}
+
+// ==========================================
+// CONFIRM CLOSE DESTINATION
+// ==========================================
+
+bool confirmArrival(float expected) {
+
+  stopMotors();
+
+  int closeReadings = 0;
+
+  for (int attempt = 0; attempt < 3; attempt++) {
+
+    float distance = readDistance();
+
+    sendLiveDistance(distance);
+
+    if (
+      distance > 0 &&
+      distance <= STOP_DISTANCE + 3.0f
+    ) {
+
+      closeReadings++;
+    }
+
+    waitMs(PING_GAP);
+  }
+
+  return
+    closeReadings >= 2 &&
+    expected <= STOP_DISTANCE + 15.0f;
+}
+
+// ==========================================
+// FINAL CONTACT MOVEMENT
+// ==========================================
+
+bool touchDestination() {
+
+  stopMotors();
+
+  pointServo(90, 200);
+
+  status(F("Making gentle contact"));
+
+  resetEncoders();
+
+  unsigned long start = millis();
+
+  unsigned long lastMovement = millis();
+
+  unsigned long previousLeft = 0;
+  unsigned long previousRight = 0;
+
+  drive(CONTACT_SPEED, CONTACT_SPEED);
+
+  while (millis() - start < CONTACT_TIME) {
+
+    holdServo();
+
+    if (missionExpired()) {
+
+      fail(F("ERROR: Mission timeout"));
+
+      return false;
+    }
+
+    unsigned long left, right;
+
+    getEncoders(left, right);
+
+    if (
+      left != previousLeft ||
+      right != previousRight
+    ) {
+
+      previousLeft = left;
+      previousRight = right;
+
+      lastMovement = millis();
+    }
+
+    // Limit final forward movement.
+
+    if (travelledDistance() >= CONTACT_DISTANCE) {
+
+      break;
+    }
+
+    // Avoid continuing to push if the
+    // wheels stop turning.
+
+    if (millis() - lastMovement >= 180) {
+
+      break;
+    }
+  }
+
+  stopMotors();
+
+  waitMs(200);
+
+  printEncoders();
+
+  status(F("Contact attempt complete - verify touch"));
+
+  return true;
+}
+
+// ==========================================
+// APPROACH DESTINATION
+// ==========================================
+
+bool approachDestination() {
+
+  stopMotors();
+
+  pointServo(90, 300);
+
+  float bearing =
+    radians(90.0f - targetServoAngle);
+
+  float expected = sqrt(
+    targetDistance * targetDistance +
+    SENSOR_OFFSET * SENSOR_OFFSET +
+    2.0f * SENSOR_OFFSET *
+    targetDistance * cos(bearing)
+  ) - SENSOR_OFFSET;
+
+  unsigned long start = millis();
+
+  unsigned long lastLeftMovement = millis();
+  unsigned long lastRightMovement = millis();
+
+  unsigned long previousLeft = 0;
+  unsigned long previousRight = 0;
+
+  unsigned long movementStart = millis();
+
+  int missingReadings = 0;
+  int recoveryAttempts = 0;
+
+  bool moving = false;
+
+  float progressReference = expected;
+  float progressTicks = 0;
+
+  resetEncoders();
+
+  status(F("Approaching destination"));
+
+  while (millis() - start < APPROACH_TIMEOUT) {
+
+    if (missionExpired()) {
+
+      fail(F("ERROR: Mission timeout"));
+
+      return false;
+    }
+
+    float distance = readDistance();
+
+    sendLiveDistance(distance);
+
+    // ======================================
+    // FINAL CONTACT
+    // ======================================
+
+    if (
+      distance > 0 &&
+      distance <= STOP_DISTANCE
+    ) {
+
+      stopMotors();
+
+      waitMs(PING_GAP);
+
+      if (confirmArrival(expected)) {
+
+        return touchDestination();
+      }
+
+      fail(F("Stopped for unexpected obstacle"));
+
+      return false;
+    }
+
+    // ======================================
+    // MISSING OR INCONSISTENT READINGS
+    // ======================================
+
+    if (!matchesTarget(distance, expected)) {
+
+      stopMotors();
+
+      moving = false;
+
+      missingReadings++;
+
+      status(F("Retrying target reading"));
+
+      waitMs(PING_GAP);
+
+      if (
+        missingReadings >= MAX_MISSING_READINGS
+      ) {
+
+        // Avoid turning around blindly when
+        // already very close to the object.
+
+        if (expected <= 15.0f) {
+
+          status(F("Stopped near target - echo lost"));
+
+          return false;
+        }
+
+        bool recovered = false;
+
+        float recoveredDistance = 0;
+
+        while (
+          recoveryAttempts < MAX_RECOVERIES
+        ) {
+
+          recoveryAttempts++;
+
+          int range =
+            recoveryAttempts % 2 == 1
+            ? 20
+            : 40;
+
+          if (
+            recoverTarget(
+              expected,
+              range,
+              recoveredDistance
+            )
+          ) {
+
+            recovered = true;
+
+            break;
+          }
+
+          if (fatalError) {
+
+            return false;
+          }
+        }
+
+        if (!recovered) {
+
+          status(F("Target recovery exhausted"));
+
+          return false;
+        }
+
+        expected = recoveredDistance;
+
+        missingReadings = 0;
+      }
+
+      continue;
+    }
+
+    missingReadings = 0;
+
+    expected = distance;
+
+    // ======================================
+    // START OR RESUME MOVEMENT
+    // ======================================
+
+    if (!moving) {
+
+      resetEncoders();
+
+      previousLeft = 0;
+      previousRight = 0;
+
+      lastLeftMovement = millis();
+      lastRightMovement = millis();
+
+      movementStart = millis();
+
+      progressReference = distance;
+      progressTicks = 0;
+
+      moving = true;
+
+      status(F("Driving forward"));
+    }
+
+    // ======================================
+    // SPEED CONTROL
+    // ======================================
+
+    int speed;
+
+    if (distance > SLOW_DISTANCE) {
+
+      speed = DRIVE_SPEED;
+
+    } else if (distance > 15.0f) {
+
+      speed = SLOW_SPEED;
+
+    } else {
+
+      speed = CONTACT_SPEED;
+    }
+
+    if (
+      millis() - movementStart < 100 &&
+      distance > SLOW_DISTANCE
+    ) {
+
+      speed = START_SPEED;
+    }
+
+    driveStraight(speed);
+
+    // ======================================
+    // ENCODER PROTECTION
+    // ======================================
+
+    unsigned long left, right;
+
+    getEncoders(left, right);
+
+    if (left != previousLeft) {
+
+      previousLeft = left;
+
+      lastLeftMovement = millis();
+    }
+
+    if (right != previousRight) {
+
+      previousRight = right;
+
+      lastRightMovement = millis();
+    }
+
+    if (
+      millis() - lastLeftMovement >
+      STALL_TIMEOUT ||
+      millis() - lastRightMovement >
+      STALL_TIMEOUT
+    ) {
+
+      fail(F("ERROR: Motor or encoder stalled"));
+
+      return false;
+    }
+
+    // ======================================
+    // CHECK FOR FORWARD PROGRESS
+    // ======================================
+
+    float averageTicks =
+      (left + right) / 2.0f;
+
+    float travelled =
+      (averageTicks - progressTicks) *
+      MM_PER_TICK / 10.0f;
+
+    if (travelled >= 15.0f) {
+
+      float improvement =
+        progressReference - distance;
+
+      if (improvement < 3.0f) {
+
+        stopMotors();
+
+        moving = false;
+
+        if (distance <= 15.0f) {
+
+          status(F("Stopped - no close-range progress"));
+
+          return false;
+        }
+
+        status(F("Checking destination alignment"));
+
+        if (
+          recoveryAttempts >= MAX_RECOVERIES
+        ) {
+
+          return false;
+        }
+
+        recoveryAttempts++;
+
+        float recovered;
+
+        waitMs(PING_GAP);
+
+        if (
+          recoverTarget(
+            expected,
+            30,
+            recovered
+          )
+        ) {
+
+          expected = recovered;
+
+        } else {
+
+          return false;
+        }
+
+        continue;
+      }
+
+      progressReference = distance;
+      progressTicks = averageTicks;
+    }
+
+    // Continuous slow movement near the
+    // destination instead of 20 ms bursts.
+
+    waitMs(PING_GAP);
+  }
+
+  fail(F("ERROR: Approach timeout"));
+
+  return false;
+}
+
+// ==========================================
+// SETUP
+// ==========================================
+
+void setup() {
+
+  pinMode(enA, OUTPUT);
+  pinMode(in1, OUTPUT);
+  pinMode(in2, OUTPUT);
+
+  pinMode(enB, OUTPUT);
+  pinMode(in3, OUTPUT);
+  pinMode(in4, OUTPUT);
+
+  pinMode(frontTrig, OUTPUT);
+  pinMode(frontEcho, INPUT);
+
+  pinMode(servoPin, OUTPUT);
+
+  pinMode(leftEncoderPin, INPUT_PULLUP);
+  pinMode(rightEncoderPin, INPUT_PULLUP);
+
+  pinMode(LED_BUILTIN, OUTPUT);
+
+  digitalWrite(LED_BUILTIN, LOW);
+
+  digitalWrite(frontTrig, LOW);
+  digitalWrite(servoPin, LOW);
+
+  attachInterrupt(
+    digitalPinToInterrupt(leftEncoderPin),
+    leftEncoder,
+    CHANGE
+  );
+
+  attachInterrupt(
+    digitalPinToInterrupt(rightEncoderPin),
+    rightEncoder,
+    CHANGE
+  );
+
+  stopMotors();
+
+  Serial.begin(115200);
+
+  pointServo(90, 2000);
+
+  sendConfig();
+
+  status(F("Robot ready"));
+
+  missionStart = millis();
+}
+
+// ==========================================
+// MAIN LOOP
+// ==========================================
+
+void loop() {
+
+  if (finished || fatalError) {
+
+    stopMotors();
+
+    holdServo();
+
+    return;
+  }
+
+  if (missionExpired()) {
+
+    fail(F("ERROR: Mission timeout"));
+
+    return;
+  }
+
+  // ======================================
+  // SEARCH FOR WIDEST OBJECT
+  // ======================================
+
+  if (!findDestination()) {
+
+    stopMotors();
+
+    if (fatalError) {
+
+      return;
+    }
+
+    if (scanRetries >= MAX_SCAN_RETRIES) {
+
+      fail(F("ERROR: Search attempts exhausted"));
+
+      return;
+    }
+
+    scanRetries++;
+
+    Serial.print(F("Search retry: "));
+    Serial.print(scanRetries);
+
+    Serial.print(F(" / "));
+    Serial.println(MAX_SCAN_RETRIES);
+
+    // Move forward and obtain a better view.
+
+    if (!moveForwardAndRescan()) {
+
+      if (fatalError) {
+
+        return;
+      }
+
+      if (scanRetries >= 3) {
+        fail(F("Unable to reposition or select target"));
+        return;
+      }
+
+      status(F("Retrying scan from current position"));
+
+      waitMs(500);
+    }
+
+    return;
+  }
+
+  // ======================================
+  // TURN TOWARDS DESTINATION
+  // ======================================
+
+  if (!turnRobot(targetAngle)) {
+
+    stopMotors();
+
+    finished = true;
+
+    return;
+  }
+
+  // ======================================
+  // APPROACH AND TOUCH DESTINATION
+  // ======================================
+
+  bool completed = approachDestination();
+
+  stopMotors();
+
+  if (completed) {
+
+    digitalWrite(LED_BUILTIN, HIGH);
+
+    status(F("Contact attempt complete - verify touch"));
+
+  } else {
+
+    if (!fatalError) {
+
+      status(F("Destination not reached"));
+    }
+  }
+
+  finished = true;
+}
