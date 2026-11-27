@@ -3,10 +3,11 @@
 // Each switch is for good: it never goes back to an earlier mode until it's switched off and on.
 //
 // SWITCHING TO OBJECT FINDING:
-// - While wall following (driving along the wall, not during a corner turn or backing up), it reads the three
-//   IR sensors underneath. Once all three see the line at the same time for ALL_IR_MS (a strip of tape across
-//   its path, say), it brakes and runs the Object Finding code (see OBJECT FINDING near the end): it scans with
-//   the front sensor on its servo, picks the widest object, turns to it, drives up to it and touches it.
+// - While wall following it keeps reading the three IR sensors underneath, whatever it's doing: driving along
+//   the wall, spinning at a corner or backing up. The moment all three see the line at the same time (a strip
+//   of tape across its path, say), it stops what it's doing, brakes and runs the Object Finding code (see
+//   OBJECT FINDING near the end): it scans with the front sensor on its servo, picks the widest object, turns
+//   to it, drives up to it and touches it.
 // - The front ultrasonic sensor sits on the servo (pin A5). Until object finding starts, the servo is held
 //   pointing straight ahead, so the line and wall code see straight ahead with it.
 //
@@ -142,25 +143,25 @@ const float TOP_SPEED_MM_S = 1367.04;         // Measure: top speed of the slowe
 const float SPEED_KP = 0.1;                  // How hard a wheel that's too slow / too fast is pushed back right away
 const float SPEED_KI = 1.0;                  // How quickly the difference is built up and held (this is what
                                              // makes the two wheels match)
-const float SPEED_I_LIMIT = 40;              // Most the speed control can add to or take from one wheel's power
+const float SPEED_I_LIMIT = 50;              // Most the speed control can add to or take from one wheel's power
 const unsigned long SPEED_INTERVAL_MS = 10;  // How often the wheel speeds are checked and corrected (ms)
 const unsigned long STOPPED_US = 200000;     // No tick for this long (µs) = the wheel has stopped
 
 // Speeds (0-255, where 255 = TOP_SPEED_MM_S)
-const int BASE_SPEED = 55;  // Forward speed on the line. Slower = more time to react at corners
-const int TURN_SPEED = 55;  // Speed of both wheels when spinning in place
+const int BASE_SPEED = 50;  // Forward speed on the line. Slower = more time to react at corners
+const int TURN_SPEED = 45;  // Speed of both wheels when spinning in place
                             // (raise it if the wheels hum but don't move, lower it if the robot
                             // spins past the line)
 
 // PID for following the line, from the wall follower (tune Kp first, then Kd. Ki is optional)
-const float Kp = 3;
+const float Kp = 2;
 const float Ki = 0;
-const float Kd = 0.2;                     // Was 2.0 in the wall follower. The line position changes much faster than the
+const float Kd = 0.05;                     // Was 2.0 in the wall follower. The line position changes much faster than the
                                           // wall distance did, so 2.0 made the D term max out the steering on every
                                           // update and the robot lurched. 0.3 did best in testing
 const float INTEGRAL_LIMIT = 50;          // Stops the I term from building up too far
 const int MAX_CORRECTION = 50;            // Most the PID can add to one wheel and take from the other
-const unsigned long PID_INTERVAL_MS = 2;  // How often the PID updates (ms). The wall follower's loop took tens of
+const unsigned long PID_INTERVAL_MS = 10;  // How often the PID updates (ms). The wall follower's loop took tens of
                                           // ms because of the ultrasonic readings; the IR sensors are much faster,
                                           // and updating on every reading makes the D term jumpy
 const float LINE_POSITION_RANGE = 10;     // The error the PID sees: 0 = line under the middle sensor,
@@ -194,7 +195,7 @@ const int CONFIRM = 5;                   // Readings in a row that must agree, s
                                           // ~0.35 ms while spinning and ~5 ms while printing, so 1000 meant seconds
                                           // of driving blind after losing the line, and a spin could never stay on
                                           // the line long enough to stop
-const unsigned long LOST_MS = 50;         // No sensor seeing the line for this long (ms) = the line is lost.
+const unsigned long LOST_MS = 80;         // No sensor seeing the line for this long (ms) = the line is lost.
                                           // Shorter gaps are the line slipping between two sensors; the
                                           // robot keeps steering from the Bayes filter's last belief.
                                           // Raise it if it still stops to look around on straight lines,
@@ -209,22 +210,17 @@ const unsigned long STEADY_MS = 150;      // The robot only turns off the line a
                                           // across two sensors at once and look like a junction
 
 // Switching from line following to wall following
-const float SWITCH_FRONT_CM = 25;        // Switch once the front sensor reads closer than this (cm). Keep it above
+const float SWITCH_FRONT_CM = 35;        // Switch once the front sensor reads closer than this (cm). Keep it above
                                          // FRONT_LIMIT, or it turns at the wall ahead the moment it switches
-const int SWITCH_COUNT = 3;              // Front readings in a row under SWITCH_FRONT_CM needed to switch, so one bad
+const int SWITCH_COUNT = 2;              // Front readings in a row under SWITCH_FRONT_CM needed to switch, so one bad
                                          // reading can't switch it (it never switches back). They're about 60 ms apart,
                                          // so at BASE_SPEED it switches about 3.5 cm after the first one: roughly 20 cm
                                          // from the wall with SWITCH_FRONT_CM = 25. 1 = switch on the first reading
-const float SWITCH_DISTANCE_CM = 20;     // The left sensor must read closer than this (cm): a wall beside the robot
-const unsigned long WALL_CHECK_MS = 30;  // How often an ultrasonic sensor is read while line following (ms). While a
+const float SWITCH_DISTANCE_CM = 25;     // The left sensor must read closer than this (cm): a wall beside the robot
+const unsigned long WALL_CHECK_MS = 15;  // How often an ultrasonic sensor is read while line following (ms). While a
                                          // wall ahead is within SWITCH_FRONT_CM it takes turns (front, left, front,
                                          // left), so each is read every 60 ms and they can't hear each other's echoes.
                                          // Each reading can take up to 20 ms, which pauses the line steering
-
-// Switching from wall following to object finding
-const unsigned long ALL_IR_MS = 10;  // All three IR sensors must see the line together for this long (ms), so one
-                                     // bad reading can't switch it. Crossing 19 mm tape square on, all three see
-                                     // it for about 60 ms. Lower it if it drives over the tape without switching
 
 // Wall-following settings (the old wall code's, with speeds on the speed sensors' 0-255 scale)
 const float WALL_SET_POINT = 15;       // Distance to keep from the left wall (cm)
@@ -260,11 +256,11 @@ const int WALL_TURN_SLOW_SPEED = 45;  // Spin speed for the end of the turn, onc
                                       // front. Lower = stops closer to 90 degrees. Raise it if it stops spinning
 
 // Backing up when it gets too close to the wall ahead to turn
-const float TOUCH_CM = 6;            // Measure: a front reading under this (cm) = too close to the wall ahead to spin
+const float TOUCH_CM = 1;            // Measure: a front reading under this (cm) = too close to the wall ahead to spin
                                      // without hitting it, so it backs up and tries again. Put the robot facing a
                                      // wall, move it closer until it can't spin in place without touching, and set
                                      // this a little above the front reading there. Keep it above TOO_CLOSE_TO_READ
-const float BACK_UP_CM = 4;          // How far it backs up (cm, counted by the speed sensors) before trying again
+const float BACK_UP_CM = 1;          // How far it backs up (cm, counted by the speed sensors) before trying again
 const int BACK_UP_SPEED = 50;        // Speed backing up (raise it if the wheels hum but don't move)
 
 // Noticing the wheels aren't turning, while wall following (driving, turning or backing up)
@@ -345,8 +341,8 @@ unsigned long lostSince = 0;  // When no sensor has seen the line since (ms), 0 
 // Mode
 bool wallMode = false;            // false = line following, true = wall following (for good)
 bool objectMode = false;          // true = object finding (for good), after wall following
-unsigned long allIRSince = 0;     // When all three IR sensors started seeing the line together while wall
-                                  // following (ms), 0 = they don't right now
+bool allIRSeen = false;           // All three IR sensors have seen the line at the same time while wall
+                                  // following (driving, turning or backing up): switch to object finding
 unsigned long lastWallCheck = 0;  // When an ultrasonic sensor was last read while line following (ms)
 int wallCount = 0;                // Front readings in a row under SWITCH_FRONT_CM
 bool leftWallClose = false;       // The left sensor's latest reading was under SWITCH_DISTANCE_CM
@@ -565,10 +561,13 @@ void correctWheel(int target, float measured, float &error, float &boost, float 
 }
 
 // Check both wheel speeds and correct them. Call this often: it does the work every SPEED_INTERVAL_MS.
-// It also keeps the servo holding the front sensor straight ahead (a pulse every 20 ms)
+// It also keeps the servo holding the front sensor straight ahead (a pulse every 20 ms), and while wall
+// following it reads the IR sensors on every call (see watchIR()), so they're watched while driving, turning
+// and backing up
 void updateMotors() {
   holdServo();
   if (objectMode) return;  // Object finding drives the motors its own way
+  if (wallMode) watchIR();  // All three IR sensors on the line = time to switch to object finding
 
   unsigned long now = millis();
   if (now - lastSpeedUpdate < SPEED_INTERVAL_MS) return;
@@ -1130,7 +1129,6 @@ void resetWallPID() {
   frontMisses = 0;
   wallLastTime = millis();
   resetStuckCheck();  // Count the wheels' ticks afresh
-  allIRSince = 0;
 }
 
 // Forward speed for how close the wall ahead is: full speed when far, slower the closer it gets
@@ -1243,6 +1241,7 @@ void backUp(float cm) {
   resetStuckCheck();
   while (totalTicks() - start < needed) {
     updateMotors();
+    if (allIRSeen) return;  // All three IR sensors see the line: loop() brakes and switches to object finding
     if (wheelsStuck()) {
       Serial.println(F("Backing up stalled"));
       break;
@@ -1259,13 +1258,15 @@ void insideCorner() {
   Serial.println(F("Inside corner: turning right"));
 
   stop();
-  delay(100);
+  waitMs(100);  // Not delay(), so the IR sensors are still watched while it coasts to a stop
 
   while (!tryRightTurn()) {
+    if (allIRSeen) return;  // All three IR sensors see the line: loop() switches to object finding
     Serial.println(F("Stuck or touching the wall ahead: backing up to try the turn again"));
     backUp(BACK_UP_CM);
     lastFront = -1;  // It has moved, so the old front reading no longer counts
   }
+  if (allIRSeen) return;  // They saw it on the last step of the turn
 
   // Brake instead of coasting, so it doesn't keep spinning past the wall
   brake();
@@ -1278,8 +1279,10 @@ void insideCorner() {
 
 // One try at the right turn. Returns true once the turn is done. Returns false, stopped, if the front of the
 // robot is touching the wall ahead (before or during the spin) or the wheels get stuck, so insideCorner()
-// can back up and try again
+// can back up and try again. Also returns false as soon as all three IR sensors see the line (allIRSeen)
 bool tryRightTurn() {
+  if (allIRSeen) return false;
+
   // How far away the wall ahead is. After the turn, the left sensor should see it about this far away.
   float wallDistance = readDistance(frontTrig, frontEcho);
   if (touchingAhead(wallDistance, lastFront)) return false;  // Too close to spin: back up first
@@ -1297,6 +1300,8 @@ bool tryRightTurn() {
 
   // Keep turning until the sensors say it's done
   while (true) {
+    if (allIRSeen) return false;  // All three IR sensors see the line: stop turning
+
     // Nearly there once it sees the wall that was in front: slow down so it doesn't overshoot
     if (onNewWall) drive(WALL_TURN_SLOW_SPEED, -WALL_TURN_SLOW_SPEED);
 
@@ -1311,6 +1316,7 @@ bool tryRightTurn() {
       if (front > 0) lastFront = front;
       frontClear = front < 0 || front > FRONT_LIMIT;
       waitMs(20);
+      if (allIRSeen) return false;
     }
 
     // The wheels aren't turning: it's jammed against the wall
@@ -1363,17 +1369,14 @@ void wallLoop() {
   updateMotors();
 
   // Read one sensor at a time, with a short gap so they don't hear each other's echoes. The IR sensors are
-  // read the whole time in the gaps
+  // read the whole time in the gaps (by updateMotors()). As soon as all three see the line, stop here:
+  // loop() switches to object finding
   float front = readDistance(frontTrig, frontEcho);
-  waitWatchingIR(10);
+  waitMs(10);
+  if (allIRSeen) return;
   float left = readDistance(leftTrig, leftEcho);
-  waitWatchingIR(10);
-
-  // All three IR sensors see the line together: wall following is over. Switch to object finding
-  if (allIRSeeLine()) {
-    startObjectMode();
-    return;
-  }
+  waitMs(10);
+  if (allIRSeen) return;
 
   // When the front sensor misses an echo:
   if (front > 0) {
@@ -1398,6 +1401,7 @@ void wallLoop() {
     Serial.println(F("Stuck against the wall ahead"));
     brake();
     backUp(BACK_UP_CM);
+    if (allIRSeen) return;  // All three IR sensors saw the line while backing up
     lastFront = -1;  // It has moved, so the old front reading no longer counts
     insideCorner();
     return;
@@ -1442,29 +1446,13 @@ void wallLoop() {
 // Switching to object finding
 // -------------------------
 
-// Read the IR sensors and note whether all three see the line together
+// Read the IR sensors and note if all three see the line at the same time. Called from updateMotors() on
+// every call while wall following, so it's watched whatever the robot is doing (driving, turning at a corner
+// or backing up). The first reading with all three on the line switches it: the wall code stops what it's
+// doing and loop() calls startObjectMode()
 void watchIR() {
   readLineSensors();
-  if (seeLeft && seeMid && seeRight) {
-    if (allIRSince == 0) allIRSince = millis();
-  } else {
-    allIRSince = 0;
-  }
-}
-
-// Wait like waitMs(), reading the IR sensors the whole time (used while wall following)
-void waitWatchingIR(unsigned long ms) {
-  unsigned long start = millis();
-  while (millis() - start < ms) {
-    updateMotors();
-    watchIR();
-  }
-}
-
-// Have all three IR sensors seen the line together for ALL_IR_MS? A gap while an ultrasonic sensor is read
-// doesn't count against it, only a reading where one of them is off the line
-bool allIRSeeLine() {
-  return allIRSince != 0 && millis() - allIRSince >= ALL_IR_MS;
+  if (seeLeft && seeMid && seeRight) allIRSeen = true;
 }
 
 // Stop wall following and start object finding, for good
@@ -3625,6 +3613,8 @@ void loop() {
   // Once it has switched, it wall-follows for good
   if (wallMode) {
     wallLoop();
+    // All three IR sensors saw the line (driving, turning or backing up): switch to object finding
+    if (allIRSeen) startObjectMode();
     return;
   }
 
